@@ -12,25 +12,48 @@ def cosine_similarity(vector_a: np.array, vector_b: np.array) -> float:
     norm_b = np.linalg.norm(vector_b)
     return dot_product / (norm_a * norm_b)
 
+def jaccard_similarity(vec_1: np.ndarray, vec_2: np.ndarray) -> float:
+    """
+    Compute Jaccard similarity between two vectors.
+    Converts vectors to binary (presence/absence) before comparison.
+    Returns a value between 0 (completely different) and 1 (identical).
+    """
+    # Convert to binary vectors (presence/absence)
+    binary_1 = vec_1 != 0
+    binary_2 = vec_2 != 0
+    
+    # Calculate intersection and union
+    intersection = np.logical_and(binary_1, binary_2).sum()
+    union = np.logical_or(binary_1, binary_2).sum()
+    
+    # Return Jaccard similarity
+    return intersection / union if union != 0 else 0.0
 
 class VectorDatabase:
     def __init__(self, embedding_model: EmbeddingModel = None):
         self.vectors = defaultdict(np.array)
+        self.metadata = {}  # New dictionary to store metadata separately
         self.embedding_model = embedding_model or EmbeddingModel()
 
-    def insert(self, key: str, vector: np.array) -> None:
+    def insert(self, key: str, vector: np.array, metadata: dict = None) -> None:
         self.vectors[key] = vector
+        if metadata:
+            self.metadata[key] = metadata
 
     def search(
         self,
         query_vector: np.array,
         k: int,
         distance_measure: Callable = cosine_similarity,
-    ) -> List[Tuple[str, float]]:
-        scores = [
-            (key, distance_measure(query_vector, vector))
-            for key, vector in self.vectors.items()
-        ]
+    ) -> List[Tuple[str, float, dict]]:
+        scores = []
+        for key, vector in self.vectors.items():
+            similarity = distance_measure(query_vector, vector)
+            metadata = self.metadata.get(key, {})
+            # Handle both string and dict cases
+            if isinstance(key, str) and key not in self.metadata:
+                metadata = {'text': key}
+            scores.append((key, similarity, metadata))
         return sorted(scores, key=lambda x: x[1], reverse=True)[:k]
 
     def search_by_text(
@@ -39,18 +62,36 @@ class VectorDatabase:
         k: int,
         distance_measure: Callable = cosine_similarity,
         return_as_text: bool = False,
-    ) -> List[Tuple[str, float]]:
+    ) -> List[Tuple[str, float, dict]]:
         query_vector = self.embedding_model.get_embedding(query_text)
         results = self.search(query_vector, k, distance_measure)
-        return [result[0] for result in results] if return_as_text else results
+        if return_as_text:
+            # For each result, return the text from metadata if available, otherwise use the key
+            return [(r[0], r[2].get('text', r[0]), r[2]) for r in results]
+        return results
 
     def retrieve_from_key(self, key: str) -> np.array:
         return self.vectors.get(key, None)
 
-    async def abuild_from_list(self, list_of_text: List[str]) -> "VectorDatabase":
-        embeddings = await self.embedding_model.async_get_embeddings(list_of_text)
-        for text, embedding in zip(list_of_text, embeddings):
-            self.insert(text, np.array(embedding))
+    async def abuild_from_list(self, documents: List[str | dict]) -> "VectorDatabase":
+        """Build database from list of documents (either strings or dicts with metadata)
+        
+        Args:
+            documents: List of either strings or dicts containing 'text' and 'metadata' keys
+        """
+        # Handle both string and dict inputs
+        if documents and isinstance(documents[0], dict):
+            texts = [doc['text'] for doc in documents]
+            embeddings = await self.embedding_model.async_get_embeddings(texts)
+            for doc, embedding in zip(documents, embeddings):
+                key = f"{doc['metadata']['source']}_{doc['metadata']['chunk_index']}"
+                self.insert(key, np.array(embedding), metadata=doc['metadata'])
+        else:
+            # Original behavior for list of strings
+            embeddings = await self.embedding_model.async_get_embeddings(documents)
+            for text, embedding in zip(documents, embeddings):
+                self.insert(text, np.array(embedding))
+        
         return self
 
 
